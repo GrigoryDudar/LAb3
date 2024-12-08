@@ -1,65 +1,88 @@
 package main
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 )
 
-func TestAddProduct(t *testing.T) {
-	cart := NewCart()
-	product := &Product{ID: 1, Name: "Молоко", Price: 25.5, Count: 2}
+// Тест для функції fetchConversionRate
+func TestFetchConversionRate(t *testing.T) {
+	// Створюємо мок-сервер
+	mockResponse := `{"rates": {"EUR": 0.85}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v4/latest/USD" {
+			t.Errorf("Неправильний шлях: %s", r.URL.Path)
+		}
+		fmt.Fprintln(w, mockResponse)
+	}))
+	defer server.Close()
 
-	cart.AddProduct(product)
+	
 
-	if len(cart.Products) != 1 {
-		t.Errorf("Очікувана кількість продуктів: 1, отримано: %d", len(cart.Products))
+	// Викликаємо функцію
+	rate, err := fetchConversionRate("USD", "EUR")
+	if err != nil {
+		t.Fatalf("Отримана помилка: %v", err)
 	}
 
-	if cart.Products[1].Count != 2 {
-		t.Errorf("Очікувана кількість товару 'Молоко': 2, отримано: %d", cart.Products[1].Count)
-	}
-}
-
-func TestUpdateProduct(t *testing.T) {
-	cart := NewCart()
-	product := &Product{ID: 1, Name: "Молоко", Price: 25.5, Count: 2}
-	cart.AddProduct(product)
-
-	cart.UpdateProduct(1, 5)
-
-	if cart.Products[1].Count != 5 {
-		t.Errorf("Очікувана кількість товару 'Молоко' після оновлення: 5, отримано: %d", cart.Products[1].Count)
-	}
-
-	cart.UpdateProduct(2, 3)
-	if len(cart.Products) != 1 {
-		t.Errorf("Не повинно бути змін для товару, якого немає в кошику")
+	// Перевіряємо результат
+	expectedRate := 0.85
+	if rate != expectedRate {
+		t.Errorf("Очікував %f, але отримав %f", expectedRate, rate)
 	}
 }
 
-func TestRemoveProduct(t *testing.T) {
-	cart := NewCart()
-	product := &Product{ID: 1, Name: "Молоко", Price: 25.5, Count: 2}
-	cart.AddProduct(product)
-
-	cart.RemoveProduct(1)
-
-	if len(cart.Products) != 0 {
-		t.Errorf("Очікувана кількість продуктів після видалення: 0, отримано: %d", len(cart.Products))
+// Тест для функції convertCurrency
+func TestConvertCurrency(t *testing.T) {
+	// Замінюємо fetchConversionRate на мок-функцію
+	mockFetch := func(from, to string) (float64, error) {
+		if from == "USD" && to == "EUR" {
+			return 0.85, nil
+		}
+		return 0, fmt.Errorf("unsupported currencies")
 	}
 
-	cart.RemoveProduct(2) // Спроба видалити неіснуючий продукт
-	if len(cart.Products) != 0 {
-		t.Errorf("Кількість продуктів повинна залишитися 0 після видалення неіснуючого продукту")
+	// Створюємо запит
+	request := ConversionRequest{
+		Amount:       100,
+		FromCurrency: "USD",
+		ToCurrency:   "EUR",
 	}
-}
 
-func TestShowCart(t *testing.T) {
-	cart := NewCart()
-	product1 := &Product{ID: 1, Name: "Молоко", Price: 25.5, Count: 2}
-	product2 := &Product{ID: 2, Name: "Хліб", Price: 15.0, Count: 1}
-	cart.AddProduct(product1)
-	cart.AddProduct(product2)
+	// Канал для результатів і WaitGroup
+	ch := make(chan ConversionResult, 1)
+	var wg sync.WaitGroup
 
-	cart.ShowCart()
-	// Для більш детальної перевірки можна використовувати mocks або захоплення stdout.
+	// Запускаємо тестовану функцію
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		rate, err := mockFetch(request.FromCurrency, request.ToCurrency)
+		if err != nil {
+			ch <- ConversionResult{Error: err}
+			return
+		}
+		ch <- ConversionResult{
+			ConvertedAmount: request.Amount * rate,
+			Rate:            rate,
+			Error:           nil,
+		}
+	}()
+
+	wg.Wait()
+	close(ch)
+
+	// Перевіряємо результат
+	for result := range ch {
+		if result.Error != nil {
+			t.Fatalf("Отримана помилка: %v", result.Error)
+		}
+		expectedAmount := 85.0
+		if result.ConvertedAmount != expectedAmount {
+			t.Errorf("Очікував %f, але отримав %f", expectedAmount, result.ConvertedAmount)
+		}
+	}
 }

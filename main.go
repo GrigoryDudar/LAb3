@@ -2,143 +2,123 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 )
 
-// Product структура для зберігання інформації про товар
-type Product struct {
-	ID    int
-	Name  string
-	Price float64
-	Count int
+type ConversionRequest struct {
+	Amount       float64
+	FromCurrency string
+	ToCurrency   string
 }
 
-// Cart структура для зберігання товарів у кошику
-type Cart struct {
-	Products map[int]*Product
-	mu       sync.Mutex
+type ConversionResult struct {
+	ConvertedAmount float64
+	Rate            float64
+	Error           error
 }
 
-// NewCart створює новий кошик
-func NewCart() *Cart {
-	return &Cart{Products: make(map[int]*Product)}
-}
+func fetchConversionRate(from, to string) (float64, error) {
+	apiURL := fmt.Sprintf("https://api.exchangerate-api.com/v4/latest/%s", from)
 
-// AddProduct додає товар до кошика
-func (c *Cart) AddProduct(product *Product) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if p, exists := c.Products[product.ID]; exists {
-		p.Count += product.Count
-	} else {
-		c.Products[product.ID] = product
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch conversion rate: %w", err)
 	}
-	fmt.Printf("Додано: %s (%d шт.)\n", product.Name, product.Count)
-}
+	defer resp.Body.Close()
 
-// UpdateProduct оновлює кількість товару в кошику
-func (c *Cart) UpdateProduct(productID, count int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if p, exists := c.Products[productID]; exists {
-		p.Count = count
-		fmt.Printf("Оновлено: %s, нова кількість: %d\n", p.Name, p.Count)
-	} else {
-		fmt.Println("Товар не знайдено в кошику!")
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("received non-OK status code: %d", resp.StatusCode)
 	}
-}
 
-// RemoveProduct видаляє товар з кошика
-func (c *Cart) RemoveProduct(productID int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, exists := c.Products[productID]; exists {
-		delete(c.Products, productID)
-		fmt.Println("Товар видалено з кошика.")
-	} else {
-		fmt.Println("Товар не знайдено в кошику!")
+	var data map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return 0, fmt.Errorf("failed to decode response: %w", err)
 	}
+
+	rates, ok := data["rates"].(map[string]interface{})
+	if !ok {
+		return 0, fmt.Errorf("invalid response format")
+	}
+
+	rate, ok := rates[to].(float64)
+	if !ok {
+		return 0, fmt.Errorf("conversion rate for %s not found", to)
+	}
+
+	return rate, nil
 }
 
-// ShowCart виводить вміст кошика
-func (c *Cart) ShowCart() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	fmt.Println("Ваш кошик:")
-	if len(c.Products) == 0 {
-		fmt.Println("- Кошик порожній.")
+func convertCurrency(req ConversionRequest, wg *sync.WaitGroup, ch chan<- ConversionResult) {
+	defer wg.Done()
+
+	rate, err := fetchConversionRate(req.FromCurrency, req.ToCurrency)
+	if err != nil {
+		ch <- ConversionResult{Error: err}
 		return
 	}
-	for _, product := range c.Products {
-		fmt.Printf("- %s: %d шт. (%.2f грн за шт.)\n", product.Name, product.Count, product.Price)
+
+	converted := req.Amount * rate
+	ch <- ConversionResult{
+		ConvertedAmount: converted,
+		Rate:            rate,
+		Error:           nil,
 	}
 }
 
-// Головна функція
 func main() {
-	cart := NewCart()
 	reader := bufio.NewReader(os.Stdin)
+	fmt.Println("Welcome to the Currency Converter!")
 
-	fmt.Println("Система керування кошиком. Використовуйте команди: add, update, remove, show, exit")
-	for {
-		fmt.Print("\nВведіть команду: ")
-		input, _ := reader.ReadString('\n')
-		input = strings.TrimSpace(input)
+	// Запитуємо дані у користувача
+	fmt.Print("Enter the amount to convert: ")
+	amountInput, _ := reader.ReadString('\n')
+	amountInput = strings.TrimSpace(amountInput)
+	amount, err := strconv.ParseFloat(amountInput, 64)
+	if err != nil || amount <= 0 {
+		fmt.Println("Invalid amount. Please enter a positive number.")
+		return
+	}
 
-		switch strings.ToLower(input) {
-		case "add":
-			fmt.Print("Введіть ID, назву, ціну та кількість через кому (наприклад: 1,Молоко,25.50,2): ")
-			line, _ := reader.ReadString('\n')
-			line = strings.TrimSpace(line)
-			parts := strings.Split(line, ",")
-			if len(parts) != 4 {
-				fmt.Println("Неправильний формат. Спробуйте ще раз.")
-				continue
-			}
+	fmt.Print("Enter the currency you are converting from (e.g., USD): ")
+	fromCurrency, _ := reader.ReadString('\n')
+	fromCurrency = strings.ToUpper(strings.TrimSpace(fromCurrency))
 
-			id, _ := strconv.Atoi(parts[0])
-			name := parts[1]
-			price, _ := strconv.ParseFloat(parts[2], 64)
-			count, _ := strconv.Atoi(parts[3])
+	fmt.Print("Enter the currency you are converting to (e.g., EUR): ")
+	toCurrency, _ := reader.ReadString('\n')
+	toCurrency = strings.ToUpper(strings.TrimSpace(toCurrency))
 
-			cart.AddProduct(&Product{ID: id, Name: name, Price: price, Count: count})
+	// Створюємо запит на конвертацію
+	request := ConversionRequest{
+		Amount:       amount,
+		FromCurrency: fromCurrency,
+		ToCurrency:   toCurrency,
+	}
 
-		case "update":
-			fmt.Print("Введіть ID товару та нову кількість через кому (наприклад: 1,5): ")
-			line, _ := reader.ReadString('\n')
-			line = strings.TrimSpace(line)
-			parts := strings.Split(line, ",")
-			if len(parts) != 2 {
-				fmt.Println("Неправильний формат. Спробуйте ще раз.")
-				continue
-			}
+	var wg sync.WaitGroup
+	ch := make(chan ConversionResult, 1)
 
-			id, _ := strconv.Atoi(parts[0])
-			count, _ := strconv.Atoi(parts[1])
+	// Запускаємо горутину для обробки запиту
+	wg.Add(1)
+	go convertCurrency(request, &wg, ch)
 
-			cart.UpdateProduct(id, count)
+	// Чекаємо завершення
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
 
-		case "remove":
-			fmt.Print("Введіть ID товару для видалення: ")
-			line, _ := reader.ReadString('\n')
-			line = strings.TrimSpace(line)
-			id, _ := strconv.Atoi(line)
-
-			cart.RemoveProduct(id)
-
-		case "show":
-			cart.ShowCart()
-
-		case "exit":
-			fmt.Println("Вихід із програми.")
-			return
-
-		default:
-			fmt.Println("Невідома команда. Спробуйте add, update, remove, show або exit.")
+	// Отримуємо результат
+	for result := range ch {
+		if result.Error != nil {
+			fmt.Printf("Error: %v\n", result.Error)
+		} else {
+			fmt.Printf("Converted Amount: %.2f %s (Rate: %.4f)\n", result.ConvertedAmount, toCurrency, result.Rate)
 		}
 	}
 }
