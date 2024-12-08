@@ -1,65 +1,76 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 )
 
-func TestAddProduct(t *testing.T) {
-	cart := NewCart()
-	product := &Product{ID: 1, Name: "Молоко", Price: 25.5, Count: 2}
-
-	cart.AddProduct(product)
-
-	if len(cart.Products) != 1 {
-		t.Errorf("Очікувана кількість продуктів: 1, отримано: %d", len(cart.Products))
+func TestHandleForm(t *testing.T) {
+	// Ініціалізуємо BookStore
+	store := &BookStore{
+		Books: &[]string{},
+		mu:    sync.Mutex{},
 	}
 
-	if cart.Products[1].Count != 2 {
-		t.Errorf("Очікувана кількість товару 'Молоко': 2, отримано: %d", cart.Products[1].Count)
+	// Створюємо POST-запит із даними форми
+	formData := "book=TestBook"
+	req, err := http.NewRequest("POST", "/", strings.NewReader(formData))
+	if err != nil {
+		t.Fatal(err)
 	}
-}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-func TestUpdateProduct(t *testing.T) {
-	cart := NewCart()
-	product := &Product{ID: 1, Name: "Молоко", Price: 25.5, Count: 2}
-	cart.AddProduct(product)
+	// Створюємо ResponseRecorder для фіксації відповіді
+	rr := httptest.NewRecorder()
 
-	cart.UpdateProduct(1, 5)
+	// Викликаємо обробник
+	handler := http.HandlerFunc(store.HandleForm)
+	handler.ServeHTTP(rr, req)
 
-	if cart.Products[1].Count != 5 {
-		t.Errorf("Очікувана кількість товару 'Молоко' після оновлення: 5, отримано: %d", cart.Products[1].Count)
-	}
-
-	cart.UpdateProduct(2, 3)
-	if len(cart.Products) != 1 {
-		t.Errorf("Не повинно бути змін для товару, якого немає в кошику")
-	}
-}
-
-func TestRemoveProduct(t *testing.T) {
-	cart := NewCart()
-	product := &Product{ID: 1, Name: "Молоко", Price: 25.5, Count: 2}
-	cart.AddProduct(product)
-
-	cart.RemoveProduct(1)
-
-	if len(cart.Products) != 0 {
-		t.Errorf("Очікувана кількість продуктів після видалення: 0, отримано: %d", len(cart.Products))
+	// Перевіряємо, чи був редірект на /books
+	if status := rr.Code; status != http.StatusSeeOther {
+		t.Errorf("Очікував статус %d, але отримав %d", http.StatusSeeOther, status)
 	}
 
-	cart.RemoveProduct(2) // Спроба видалити неіснуючий продукт
-	if len(cart.Products) != 0 {
-		t.Errorf("Кількість продуктів повинна залишитися 0 після видалення неіснуючого продукту")
+	// Перевіряємо, чи книга була додана до сховища
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(*store.Books) != 1 || (*store.Books)[0] != "TestBook" {
+		t.Errorf("Очікував книгу 'TestBook', але отримав %+v", *store.Books)
 	}
 }
 
-func TestShowCart(t *testing.T) {
-	cart := NewCart()
-	product1 := &Product{ID: 1, Name: "Молоко", Price: 25.5, Count: 2}
-	product2 := &Product{ID: 2, Name: "Хліб", Price: 15.0, Count: 1}
-	cart.AddProduct(product1)
-	cart.AddProduct(product2)
+func TestHandleBooks(t *testing.T) {
+	// Ініціалізуємо BookStore з попередньо доданими книгами
+	store := &BookStore{
+		Books: &[]string{"Book1", "Book2"},
+		mu:    sync.Mutex{},
+	}
 
-	cart.ShowCart()
-	// Для більш детальної перевірки можна використовувати mocks або захоплення stdout.
+	// Створюємо GET-запит
+	req, err := http.NewRequest("GET", "/books", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Створюємо ResponseRecorder
+	rr := httptest.NewRecorder()
+
+	// Викликаємо обробник
+	handler := http.HandlerFunc(store.HandleBooks)
+	handler.ServeHTTP(rr, req)
+
+	// Перевіряємо статус відповіді
+	if status := rr.Code; status != http.StatusOK {
+		t.Errorf("Очікував статус %d, але отримав %d", http.StatusOK, status)
+	}
+
+	// Перевіряємо, чи відповіді містять назви книг
+	responseBody := rr.Body.String()
+	if !strings.Contains(responseBody, "Book1") || !strings.Contains(responseBody, "Book2") {
+		t.Errorf("Очікував, що відповідь містить 'Book1' і 'Book2', але отримав %s", responseBody)
+	}
 }
